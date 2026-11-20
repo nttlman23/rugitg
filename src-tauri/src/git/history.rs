@@ -4,13 +4,15 @@
 //! batches, so the UI can show the first commits immediately even in huge
 //! repositories. The UI only ever requests the rows that are visible.
 
+use super::commit_graph::CommitGraph;
 use git2::{Oid, Repository, Sort};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Vertical anchor of a segment end inside a row.
@@ -23,12 +25,20 @@ pub const BOTTOM: u8 = 2;
 #[derive(Clone, Copy, Serialize, Debug, PartialEq)]
 pub struct Seg(pub u16, pub u8, pub u16, pub u8, pub u16);
 
-pub struct Row {
-    pub oid: Oid,
+/// Subject and author of a commit. Filled while walking with libgit2, or
+/// lazily (visible rows first, the rest in the background) when the order
+/// comes from the commit-graph.
+pub struct Meta {
     pub summary: Box<str>,
     pub author: Arc<str>,
     pub email: Arc<str>,
+    /// Author time.
     pub time: i64,
+}
+
+pub struct Row {
+    pub oid: Oid,
+    pub meta: OnceLock<Meta>,
     pub node: u16,
     pub color: u16,
     pub merge: bool,
@@ -68,6 +78,9 @@ pub struct HistoryOptions {
 
 pub struct History {
     pub id: u64,
+    path: PathBuf,
+    /// Repository handle and name interner used to fill `Row::meta` lazily.
+    meta_src: Mutex<MetaSource>,
     pub rows: RwLock<Vec<Row>>,
     pub index: RwLock<HashMap<Oid, u32>>,
     pub labels: HashMap<Oid, Vec<Label>>,
@@ -79,27 +92,85 @@ pub struct History {
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Default)]
+struct MetaSource {
+    repo: Option<Repository>,
+    names: HashMap<String, Arc<str>>,
+}
+
+impl MetaSource {
+    fn intern(&mut self, s: &str) -> Arc<str> {
+        if let Some(a) = self.names.get(s) {
+            return a.clone();
+        }
+        let a: Arc<str> = Arc::from(s);
+        self.names.insert(s.to_string(), a.clone());
+        a
+    }
+
+    fn meta_of(&mut self, commit: &git2::Commit) -> Meta {
+        let author = commit.author();
+        let summary = commit.summary_bytes().map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+        Meta {
+            summary: summary.into_boxed_str(),
+            author: self.intern(&String::from_utf8_lossy(author.name_bytes())),
+            email: self.intern(&String::from_utf8_lossy(author.email_bytes())),
+            time: author.when().seconds(),
+        }
+    }
+
+    fn load(&mut self, path: &Path, oid: Oid) -> Meta {
+        if self.repo.is_none() {
+            self.repo = Repository::open(path).ok();
+        }
+        let repo = self.repo.take();
+        let meta = match repo.as_ref().and_then(|r| r.find_commit(oid).ok()) {
+            Some(c) => self.meta_of(&c),
+            None => Meta { summary: "".into(), author: "".into(), email: "".into(), time: 0 },
+        };
+        self.repo = repo;
+        meta
+    }
+}
+
 impl History {
+    /// Makes sure the rows have their subject and author loaded.
+    fn fill_meta(&self, rows: &[Row]) {
+        if rows.iter().all(|r| r.meta.get().is_some()) {
+            return;
+        }
+        let mut src = self.meta_src.lock();
+        for r in rows {
+            if r.meta.get().is_none() {
+                let m = src.load(&self.path, r.oid);
+                let _ = r.meta.set(m);
+            }
+        }
+    }
+
     pub fn rows_out(&self, start: u32, count: u32) -> Vec<RowOut> {
         let rows = self.rows.read();
         let s = (start as usize).min(rows.len());
         let e = (s + count as usize).min(rows.len());
+        self.fill_meta(&rows[s..e]);
         rows[s..e]
             .iter()
             .enumerate()
-            .map(|(i, r)| RowOut {
+            .map(|(i, r)| {
+                let m = r.meta.get();
+                RowOut {
                 idx: (s + i) as u32,
                 oid: r.oid.to_string(),
-                summary: r.summary.to_string(),
-                author: r.author.to_string(),
-                email: r.email.to_string(),
-                time: r.time,
+                summary: m.map(|m| m.summary.to_string()).unwrap_or_default(),
+                author: m.map(|m| m.author.to_string()).unwrap_or_default(),
+                email: m.map(|m| m.email.to_string()).unwrap_or_default(),
+                time: m.map(|m| m.time).unwrap_or(0),
                 node: r.node,
                 color: r.color,
                 merge: r.merge,
                 segs: r.segs.to_vec(),
                 labels: self.labels.get(&r.oid).cloned().unwrap_or_default(),
-            })
+            }})
             .collect()
     }
 
@@ -116,11 +187,16 @@ impl History {
         if n == 0 {
             return (None, 0);
         }
+        // Normally already done by the background loader.
+        self.fill_meta(&rows);
         let matches = |r: &Row| -> bool {
             if hex && r.oid.to_string().starts_with(&q) {
                 return true;
             }
-            contains_ci(&r.summary, &q) || contains_ci(&r.author, &q) || contains_ci(&r.email, &q)
+            match r.meta.get() {
+                Some(m) => contains_ci(&m.summary, &q) || contains_ci(&m.author, &q) || contains_ci(&m.email, &q),
+                None => false,
+            }
         };
         let mut total = 0u32;
         let mut found: Option<u32> = None;
@@ -358,6 +434,8 @@ pub fn start(path: PathBuf, opts: HistoryOptions, progress: ProgressFn) -> Resul
     let labels = collect_labels(&repo);
     let hist = Arc::new(History {
         id: NEXT_ID.fetch_add(1, Ordering::SeqCst),
+        path: path.clone(),
+        meta_src: Mutex::new(MetaSource::default()),
         rows: RwLock::new(Vec::new()),
         index: RwLock::new(HashMap::new()),
         labels,
@@ -378,129 +456,361 @@ pub fn start(path: PathBuf, opts: HistoryOptions, progress: ProgressFn) -> Resul
             h.done.store(true, Ordering::SeqCst);
             let n = h.rows.read().len();
             progress(h.id, n, true, res.err());
+            fill_meta_background(h);
         })
         .map_err(|e| e.to_string())?;
     Ok(hist)
 }
 
+/// Resolves the commits the history starts from.
+fn tips(repo: &Repository, opts: &HistoryOptions) -> Vec<Oid> {
+    let mut out: Vec<Oid> = Vec::new();
+    let mut add = |oid: Oid| {
+        if !out.contains(&oid) {
+            out.push(oid);
+        }
+    };
+    if opts.refs.is_empty() {
+        if let Ok(h) = repo.head().and_then(|h| h.peel_to_commit()) {
+            add(h.id());
+        }
+        for g in ["refs/heads/*", "refs/remotes/*", "refs/tags/*"] {
+            if let Ok(refs) = repo.references_glob(g) {
+                for r in refs.flatten() {
+                    if let Ok(c) = r.peel_to_commit() {
+                        add(c.id());
+                    }
+                }
+            }
+        }
+    } else {
+        for r in &opts.refs {
+            let c = if r == "HEAD" {
+                repo.head().and_then(|h| h.peel_to_commit())
+            } else {
+                repo.revparse_single(r).and_then(|o| o.peel_to_commit())
+            };
+            if let Ok(c) = c {
+                add(c.id());
+            }
+        }
+    }
+    out
+}
+
+/// Appends rows in batches and reports progress.
+struct Emitter<'a> {
+    h: &'a History,
+    progress: &'a ProgressFn,
+    lanes: LaneBuilder,
+    batch: Vec<Row>,
+    last_flush: Option<Instant>,
+    first_flush: bool,
+    total: usize,
+    max_lanes: usize,
+}
+
+impl<'a> Emitter<'a> {
+    fn new(h: &'a History, progress: &'a ProgressFn) -> Self {
+        Emitter {
+            h,
+            progress,
+            lanes: LaneBuilder::new(),
+            batch: Vec::with_capacity(4096),
+            last_flush: None,
+            first_flush: true,
+            total: 0,
+            max_lanes: 0,
+        }
+    }
+
+    fn push(&mut self, oid: Oid, parents: &[Oid], merge: bool, meta: Option<Meta>) {
+        let (node, color, segs) = self.lanes.next(oid, parents);
+        self.max_lanes = self.max_lanes.max(self.lanes.width()).max(node as usize + 1);
+        let cell = OnceLock::new();
+        if let Some(m) = meta {
+            let _ = cell.set(m);
+        }
+        self.batch.push(Row { oid, meta: cell, node, color, merge, segs: segs.into_boxed_slice() });
+        self.total += 1;
+        let limit = if self.first_flush { Duration::from_millis(30) } else { Duration::from_millis(250) };
+        let since = *self.last_flush.get_or_insert_with(Instant::now);
+        if (self.first_flush && self.batch.len() >= 200) || since.elapsed() >= limit {
+            self.flush();
+            self.last_flush = Some(Instant::now());
+            self.first_flush = false;
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.batch.is_empty() {
+            return;
+        }
+        {
+            let mut rows = self.h.rows.write();
+            let mut idx = self.h.index.write();
+            let base = rows.len() as u32;
+            for (i, r) in self.batch.iter().enumerate() {
+                idx.insert(r.oid, base + i as u32);
+            }
+            rows.append(&mut self.batch);
+        }
+        self.h.max_lanes.store(self.max_lanes as u32, Ordering::Relaxed);
+        (self.progress)(self.h.id, self.total, false, None);
+    }
+}
+
 fn walk(path: &PathBuf, opts: &HistoryOptions, h: &History, progress: &ProgressFn) -> Result<(), String> {
     let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
+    let tips = tips(&repo, opts);
+    if tips.is_empty() {
+        return Ok(());
+    }
+    // Replacement refs change parents; git disables the commit-graph then too.
+    let replaced = repo.references_glob("refs/replace/*").map(|mut r| r.next().is_some()).unwrap_or(false);
+    if !replaced {
+        if let Some(graph) = CommitGraph::open(repo.commondir()) {
+            if let Some(order) = graph_order(&repo, &graph, &tips, opts, &h.cancel) {
+                let mut em = Emitter::new(h, progress);
+                for (oid, parents, merge) in &order.commits {
+                    if h.cancel.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    em.push(*oid, parents, *merge, None);
+                }
+                em.flush();
+                maybe_write_commit_graph(path, order.commits.len(), order.outside_graph);
+                return Ok(());
+            }
+        }
+    }
+    let n = revwalk(&repo, &tips, opts, h, progress)?;
+    maybe_write_commit_graph(path, n, n);
+    Ok(())
+}
+
+/// Fallback without a commit-graph: libgit2 revwalk, which parses every
+/// commit before the first one comes out in topological order.
+fn revwalk(repo: &Repository, tips: &[Oid], opts: &HistoryOptions, h: &History, progress: &ProgressFn) -> Result<usize, String> {
     let mut walk = repo.revwalk().map_err(|e| e.message().to_string())?;
     let sort = if opts.topo { Sort::TOPOLOGICAL | Sort::TIME } else { Sort::TIME };
     walk.set_sorting(sort).map_err(|e| e.message().to_string())?;
     if opts.first_parent {
         let _ = walk.simplify_first_parent();
     }
-    let mut pushed = 0;
-    if opts.refs.is_empty() {
-        for g in ["refs/heads", "refs/remotes", "refs/tags"] {
-            if walk.push_glob(g).is_ok() {
-                pushed += 1;
-            }
-        }
-        if walk.push_head().is_ok() {
-            pushed += 1;
-        }
-    } else {
-        for r in &opts.refs {
-            let ok = if r == "HEAD" {
-                walk.push_head().is_ok()
-            } else {
-                match repo.revparse_single(r).and_then(|o| o.peel_to_commit()) {
-                    Ok(c) => walk.push(c.id()).is_ok(),
-                    Err(_) => false,
-                }
-            };
-            if ok {
-                pushed += 1;
-            }
-        }
+    for t in tips {
+        let _ = walk.push(*t);
     }
-    if pushed == 0 {
-        return Ok(());
-    }
-
-    let mut lanes = LaneBuilder::new();
-    let mut names: HashMap<String, Arc<str>> = HashMap::new();
-    let mut intern = |s: &str| -> Arc<str> {
-        if let Some(a) = names.get(s) {
-            return a.clone();
-        }
-        let a: Arc<str> = Arc::from(s);
-        names.insert(s.to_string(), a.clone());
-        a
-    };
-
-    let mut batch: Vec<Row> = Vec::with_capacity(4096);
-    let mut last_flush: Option<Instant> = None;
-    let mut first_flush = true;
-    let mut total = 0usize;
-    let mut max_lanes = 0usize;
+    let mut src = MetaSource::default();
+    let mut em = Emitter::new(h, progress);
     let mut parents: Vec<Oid> = Vec::with_capacity(4);
-
-    let flush = |batch: &mut Vec<Row>, total: usize, max_lanes: usize| {
-        if batch.is_empty() {
-            return;
-        }
-        {
-            let mut rows = h.rows.write();
-            let mut idx = h.index.write();
-            let base = rows.len() as u32;
-            for (i, r) in batch.iter().enumerate() {
-                idx.insert(r.oid, base + i as u32);
-            }
-            rows.append(batch);
-        }
-        h.max_lanes.store(max_lanes as u32, Ordering::Relaxed);
-        progress(h.id, total, false, None);
-    };
-
     for oid in walk {
         if h.cancel.load(Ordering::Relaxed) {
-            return Ok(());
+            return Ok(em.total);
         }
-        let oid = match oid {
-            Ok(o) => o,
-            Err(_) => continue,
-        };
-        let commit = match repo.find_commit(oid) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        let Ok(oid) = oid else { continue };
+        let Ok(commit) = repo.find_commit(oid) else { continue };
         parents.clear();
         if opts.first_parent {
-            if let Some(p) = commit.parent_ids().next() {
-                parents.push(p);
-            }
+            parents.extend(commit.parent_ids().take(1));
         } else {
             parents.extend(commit.parent_ids());
         }
-        let (node, color, segs) = lanes.next(oid, &parents);
-        max_lanes = max_lanes.max(lanes.width()).max(node as usize + 1);
-        let author = commit.author();
-        let summary = commit.summary_bytes().map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
-        batch.push(Row {
-            oid,
-            summary: summary.into_boxed_str(),
-            author: intern(&String::from_utf8_lossy(author.name_bytes())),
-            email: intern(&String::from_utf8_lossy(author.email_bytes())),
-            time: author.when().seconds(),
-            node,
-            color,
-            merge: commit.parent_count() > 1,
-            segs: segs.into_boxed_slice(),
-        });
-        total += 1;
-        let limit = if first_flush { Duration::from_millis(30) } else { Duration::from_millis(250) };
-        let since = *last_flush.get_or_insert_with(Instant::now);
-        if (first_flush && batch.len() >= 200) || since.elapsed() >= limit {
-            flush(&mut batch, total, max_lanes);
-            last_flush = Some(Instant::now());
-            first_flush = false;
-        }
+        let meta = src.meta_of(&commit);
+        em.push(oid, &parents, commit.parent_count() > 1, Some(meta));
     }
-    flush(&mut batch, total, max_lanes);
-    Ok(())
+    em.flush();
+    Ok(em.total)
+}
+
+struct GraphOrder {
+    /// (commit, parents, is merge) in display order.
+    commits: Vec<(Oid, Vec<Oid>, bool)>,
+    /// Commits that had to be parsed because the commit-graph lacks them.
+    outside_graph: usize,
+}
+
+/// Orders the history using the commit-graph (no commit objects are inflated
+/// except those newer than the graph). Returns None if the graph is unusable.
+fn graph_order(repo: &Repository, graph: &CommitGraph, tips: &[Oid], opts: &HistoryOptions, cancel: &AtomicBool) -> Option<GraphOrder> {
+    const NONE: u32 = u32::MAX;
+    struct Node {
+        oid: Oid,
+        time: i64,
+        pos: u32,
+        parents: Vec<u32>,
+        merge: bool,
+        done: bool,
+        missing: bool,
+    }
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut by_pos: Vec<u32> = vec![NONE; graph.len() as usize];
+    let mut by_oid: HashMap<Oid, u32> = HashMap::new();
+    let mut outside = 0usize;
+
+    let mut node_for = |nodes: &mut Vec<Node>, oid: Option<Oid>, pos: Option<u32>| -> Option<u32> {
+        let pos = pos.or_else(|| oid.and_then(|o| graph.find(&o)));
+        if let Some(p) = pos {
+            let slot = by_pos.get_mut(p as usize)?;
+            if *slot == NONE {
+                let oid = match oid {
+                    Some(o) => o,
+                    None => graph.oid(p)?,
+                };
+                *slot = nodes.len() as u32;
+                nodes.push(Node { oid, time: graph.time(p), pos: p, parents: Vec::new(), merge: false, done: false, missing: false });
+            }
+            return Some(*slot);
+        }
+        let oid = oid?;
+        Some(*by_oid.entry(oid).or_insert_with(|| {
+            nodes.push(Node { oid, time: 0, pos: NONE, parents: Vec::new(), merge: false, done: false, missing: false });
+            (nodes.len() - 1) as u32
+        }))
+    };
+
+    let mut stack: Vec<u32> = Vec::new();
+    for t in tips {
+        stack.push(node_for(&mut nodes, Some(*t), None)?);
+    }
+    let mut tmp: Vec<u32> = Vec::with_capacity(4);
+    let mut steps = 0u32;
+    while let Some(n) = stack.pop() {
+        if nodes[n as usize].done {
+            continue;
+        }
+        nodes[n as usize].done = true;
+        steps = steps.wrapping_add(1);
+        if steps.is_multiple_of(65536) && cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut parents: Vec<u32> = Vec::new();
+        let pos = nodes[n as usize].pos;
+        if pos != NONE {
+            tmp.clear();
+            if !graph.parents(pos, &mut tmp) {
+                return None;
+            }
+            nodes[n as usize].merge = tmp.len() > 1;
+            for &pp in tmp.iter() {
+                parents.push(node_for(&mut nodes, None, Some(pp))?);
+            }
+        } else {
+            // Newer than the commit-graph: read the commit itself.
+            outside += 1;
+            let oid = nodes[n as usize].oid;
+            match repo.find_commit(oid) {
+                Ok(c) => {
+                    nodes[n as usize].time = c.time().seconds();
+                    nodes[n as usize].merge = c.parent_count() > 1;
+                    for po in c.parent_ids() {
+                        parents.push(node_for(&mut nodes, Some(po), None)?);
+                    }
+                }
+                Err(_) => nodes[n as usize].missing = true,
+            }
+        }
+        if opts.first_parent {
+            parents.truncate(1);
+        }
+        for &p in &parents {
+            if !nodes[p as usize].done {
+                stack.push(p);
+            }
+        }
+        nodes[n as usize].parents = parents;
+    }
+
+    // Parents that could not be read (e.g. shallow clone boundary) are dropped.
+    let missing: Vec<bool> = nodes.iter().map(|n| n.missing).collect();
+    for n in nodes.iter_mut() {
+        n.parents.retain(|p| !missing[*p as usize]);
+    }
+
+    let order: Vec<u32> = if opts.topo {
+        // Kahn's algorithm: a commit comes out only after all its children,
+        // the newest ready commit first.
+        let mut children = vec![0u32; nodes.len()];
+        for n in &nodes {
+            for &p in &n.parents {
+                children[p as usize] += 1;
+            }
+        }
+        let mut heap: BinaryHeap<(i64, Reverse<u32>)> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| children[*i] == 0 && !n.missing)
+            .map(|(i, n)| (n.time, Reverse(i as u32)))
+            .collect();
+        let mut out = Vec::with_capacity(nodes.len());
+        while let Some((_, Reverse(i))) = heap.pop() {
+            out.push(i);
+            for &p in &nodes[i as usize].parents {
+                let c = &mut children[p as usize];
+                *c -= 1;
+                if *c == 0 {
+                    heap.push((nodes[p as usize].time, Reverse(p)));
+                }
+            }
+        }
+        out
+    } else {
+        let mut v: Vec<u32> = (0..nodes.len() as u32).filter(|i| !missing[*i as usize]).collect();
+        v.sort_by_key(|&i| (Reverse(nodes[i as usize].time), i));
+        v
+    };
+
+    let commits = order
+        .into_iter()
+        .map(|i| {
+            let n = &nodes[i as usize];
+            (n.oid, n.parents.iter().map(|p| nodes[*p as usize].oid).collect(), n.merge)
+        })
+        .collect();
+    Some(GraphOrder { commits, outside_graph: outside })
+}
+
+static WRITING_GRAPH: AtomicBool = AtomicBool::new(false);
+
+/// Large histories without an up-to-date commit-graph get one written in the
+/// background (as `git gc`/`git maintenance` would), so that the next load
+/// does not need to parse every commit.
+fn maybe_write_commit_graph(path: &Path, total: usize, outside_graph: usize) {
+    const LARGE: usize = 20_000;
+    const STALE: usize = 2_000;
+    if total < LARGE || outside_graph < STALE {
+        return;
+    }
+    if WRITING_GRAPH.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let args: Vec<String> = ["commit-graph", "write", "--reachable", "--split"].iter().map(|s| s.to_string()).collect();
+        let _ = super::cli::run(&path, &args, None);
+        WRITING_GRAPH.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Loads subjects and authors of all rows in the background so that search
+/// does not have to wait for them.
+pub fn fill_meta_background(h: Arc<History>) {
+    std::thread::spawn(move || {
+        let mut start = 0usize;
+        loop {
+            if h.cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let rows = h.rows.read();
+            if start >= rows.len() {
+                return;
+            }
+            let end = (start + 2048).min(rows.len());
+            h.fill_meta(&rows[start..end]);
+            drop(rows);
+            start = end;
+        }
+    });
 }
 
 #[cfg(test)]
@@ -602,5 +912,49 @@ mod bench {
         drop(rows);
         let r = h.search("merge branch", 0, true);
         println!("search {:?} in {:?}", r, t2.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod graph_check {
+    use super::*;
+
+    /// RUGITG_BENCH_REPO=/path cargo test --release --lib graph_matches_revwalk -- --ignored --nocapture
+    /// The repository needs a commit-graph (git commit-graph write --reachable).
+    #[test]
+    #[ignore]
+    fn graph_matches_revwalk() {
+        let Ok(path) = std::env::var("RUGITG_BENCH_REPO") else { return };
+        let repo = Repository::open(&path).unwrap();
+        let opts = HistoryOptions { refs: vec![], topo: true, first_parent: false };
+        let tips = tips(&repo, &opts);
+        let graph = CommitGraph::open(repo.commondir()).expect("repository has no commit-graph");
+        let t = Instant::now();
+        let order = graph_order(&repo, &graph, &tips, &opts, &AtomicBool::new(false)).expect("graph order");
+        println!("graph order: {} commits ({} outside graph) in {:?}", order.commits.len(), order.outside_graph, t.elapsed());
+
+        // Same commits and parents as libgit2.
+        let mut walk = repo.revwalk().unwrap();
+        for t in &tips {
+            walk.push(*t).unwrap();
+        }
+        let mut expected: HashMap<Oid, Vec<Oid>> = HashMap::new();
+        for oid in walk {
+            let oid = oid.unwrap();
+            expected.insert(oid, repo.find_commit(oid).unwrap().parent_ids().collect());
+        }
+        assert_eq!(order.commits.len(), expected.len(), "commit count");
+        for (oid, parents, merge) in &order.commits {
+            assert_eq!(expected.get(oid), Some(parents), "parents of {oid}");
+            assert_eq!(*merge, parents.len() > 1);
+        }
+        // Topological: every commit comes before its parents.
+        let pos: HashMap<Oid, usize> = order.commits.iter().enumerate().map(|(i, c)| (c.0, i)).collect();
+        for (i, (_, parents, _)) in order.commits.iter().enumerate() {
+            for p in parents {
+                assert!(pos[p] > i, "parent before child");
+            }
+        }
+        println!("graph order matches libgit2 and is topological");
     }
 }

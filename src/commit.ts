@@ -8,9 +8,18 @@ import { onPref, prefs, setPref } from "./prefs";
 import { button, clear, confirmDialog, dialog, errorDialog, h, icon, notify, paned, popupMenu, type MenuItem } from "./ui";
 
 type Section = "conflicted" | "staged" | "unstaged" | "untracked";
-const MAX_ROWS = 3000;
+// Row heights of the virtualised file list.
+const H_HEADER = 34;
+const H_EMPTY = 26;
+const H_FILE = 28;
+const OVERSCAN = 8;
 
 interface Item { section: Section; e: StatusEntry }
+
+type ListRow =
+  | { kind: "header"; sec: Section; title: string; count: number }
+  | { kind: "empty"; text: string }
+  | { kind: "file"; item: Item; index: number };
 
 export class CommitView {
   el: HTMLElement;
@@ -30,9 +39,22 @@ export class CommitView {
   private draft = "";
   private visible = false;
   private lastSig = "";
+  // Virtualised list state.
+  private itemList: Item[] = [];
+  private keyIndex = new Map<string, number>();
+  private rows: ListRow[] = [];
+  private offsets: number[] = [];
+  private spacer: HTMLElement;
+  private layer: HTMLElement;
+  private raf = 0;
 
   constructor() {
-    this.side = h("div", { class: "sidebar files", tabindex: 0, role: "listbox", "aria-label": t("Changed files"), "aria-multiselectable": "true" });
+    this.spacer = h("div", { class: "vlist-spacer" });
+    this.layer = h("div", { class: "vlist-layer" });
+    this.side = h("div", { class: "sidebar files", tabindex: 0, role: "listbox", "aria-label": t("Changed files"), "aria-multiselectable": "true" }, this.spacer, this.layer);
+    this.side.addEventListener("scroll", () => this.schedule());
+    new ResizeObserver(() => this.schedule()).observe(this.side);
+    this.attachListEvents();
     this.banner = h("div", { class: "banner hidden" });
     this.diff = new DiffView({
       selectable: true,
@@ -88,7 +110,7 @@ export class CommitView {
     this.current = null;
     this.focusKey = null;
     this.draft = "";
-    clear(this.side);
+    this.setRows([]);
     clear(this.diffWrap);
   }
 
@@ -120,19 +142,12 @@ export class CommitView {
           : h("div", { class: "empty-state" }, t("Select a file to see its changes")));
       }
     } catch (e) {
-      clear(this.side);
-      this.side.appendChild(h("div", { class: "empty-state" }, String(e)));
+      this.setRows([{ kind: "empty", text: String(e) }]);
     }
   }
 
   private items(): Item[] {
-    const s = this.status;
-    if (!s) return [];
-    const out: Item[] = [];
-    for (const sec of ["conflicted", "staged", "unstaged", "untracked"] as Section[]) {
-      for (const e of s[sec].slice(0, MAX_ROWS)) out.push({ section: sec, e });
-    }
-    return out;
+    return this.itemList;
   }
 
   private renderBanner() {
@@ -160,28 +175,87 @@ export class CommitView {
 
   private renderList() {
     const s = this.status!;
-    const scroll = this.side.scrollTop;
-    clear(this.side);
-    const valid = new Set(this.items().map(key));
-    for (const k of [...this.selected]) if (!valid.has(k)) this.selected.delete(k);
-
-    const section = (sec: Section, title: string, entries: StatusEntry[], actions: HTMLElement[]) => {
-      if (entries.length === 0 && (sec === "conflicted" || sec === "untracked")) return;
-      this.side.appendChild(h("div", { class: "files-header" }, h("span", null, title), h("span", { class: "count" }, String(entries.length)), h("span", { class: "spacer" }), ...actions));
-      if (entries.length === 0) {
-        this.side.appendChild(h("div", { class: "files-empty dim" }, sec === "staged" ? t("No staged changes") : t("No changes")));
+    const items: Item[] = [];
+    const rows: ListRow[] = [];
+    for (const [sec, title] of [["conflicted", t("Conflicts")], ["staged", t("Staged")], ["unstaged", t("Unstaged")], ["untracked", t("Untracked")]] as [Section, string][]) {
+      const entries = s[sec];
+      if (entries.length === 0 && (sec === "conflicted" || sec === "untracked")) continue;
+      rows.push({ kind: "header", sec, title, count: entries.length });
+      if (entries.length === 0) rows.push({ kind: "empty", text: sec === "staged" ? t("No staged changes") : t("No changes") });
+      for (const e of entries) {
+        const item = { section: sec, e };
+        rows.push({ kind: "file", item, index: items.length });
+        items.push(item);
       }
-      for (const e of entries.slice(0, MAX_ROWS)) this.side.appendChild(this.row({ section: sec, e }));
-      if (entries.length > MAX_ROWS) this.side.appendChild(h("div", { class: "files-empty dim" }, t("…and {0} more", entries.length - MAX_ROWS)));
-    };
-    section("conflicted", t("Conflicts"), s.conflicted, []);
-    section("staged", t("Staged"), s.staged, s.staged.length ? [button(null, { icon: "minus", cls: "flat small", title: t("Unstage all"), onclick: () => this.unstage(s.staged.map((e) => e.path)) })] : []);
-    section("unstaged", t("Unstaged"), s.unstaged, s.unstaged.length ? [button(null, { icon: "plus", cls: "flat small", title: t("Stage all changes"), onclick: () => this.stage(s.unstaged.map((e) => e.path)) })] : []);
-    section("untracked", t("Untracked"), s.untracked, s.untracked.length ? [button(null, { icon: "plus", cls: "flat small", title: t("Stage all untracked files"), onclick: () => this.stage(s.untracked.map((e) => e.path)) })] : []);
-    this.side.scrollTop = scroll;
+    }
+    this.itemList = items;
+    this.keyIndex = new Map(items.map((it, i) => [key(it), i]));
+    for (const k of [...this.selected]) if (!this.keyIndex.has(k)) this.selected.delete(k);
+    if (this.focusKey && !this.keyIndex.has(this.focusKey)) this.focusKey = null;
+    this.setRows(rows);
   }
 
-  private row(it: Item): HTMLElement {
+  private setRows(rows: ListRow[]) {
+    this.rows = rows;
+    this.offsets = new Array(rows.length + 1);
+    let y = 0;
+    rows.forEach((r, i) => {
+      this.offsets[i] = y;
+      y += r.kind === "header" ? H_HEADER : r.kind === "empty" ? H_EMPTY : H_FILE;
+    });
+    this.offsets[rows.length] = y;
+    this.spacer.style.height = y + "px";
+    this.renderWindow();
+  }
+
+  private schedule() {
+    if (this.raf) return;
+    this.raf = requestAnimationFrame(() => {
+      this.raf = 0;
+      this.renderWindow();
+    });
+  }
+
+  /** First row whose bottom edge is below y. */
+  private rowAt(y: number): number {
+    let lo = 0, hi = this.rows.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.offsets[mid + 1] <= y) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  private renderWindow() {
+    clear(this.layer);
+    if (this.rows.length === 0) return;
+    const top = this.side.scrollTop;
+    const first = Math.max(0, this.rowAt(top) - OVERSCAN);
+    const last = Math.min(this.rows.length - 1, this.rowAt(top + this.side.clientHeight) + OVERSCAN);
+    const cur = this.current ? key(this.current.item) : null;
+    for (let i = first; i <= last; i++) {
+      const r = this.rows[i];
+      let el: HTMLElement;
+      if (r.kind === "header") el = this.headerRow(r.sec, r.title, r.count);
+      else if (r.kind === "empty") el = h("div", { class: "files-empty dim" }, r.text);
+      else el = this.fileRow(r.item, r.index, cur);
+      el.classList.add("vrow");
+      el.style.top = this.offsets[i] + "px";
+      this.layer.appendChild(el);
+    }
+  }
+
+  private headerRow(sec: Section, title: string, count: number): HTMLElement {
+    const paths = () => this.status![sec].map((e) => e.path);
+    const actions: HTMLElement[] = [];
+    if (count && sec === "staged") actions.push(button(null, { icon: "minus", cls: "flat small", title: t("Unstage all"), onclick: () => this.unstage(paths()) }));
+    if (count && sec === "unstaged") actions.push(button(null, { icon: "plus", cls: "flat small", title: t("Stage all changes"), onclick: () => this.stage(paths()) }));
+    if (count && sec === "untracked") actions.push(button(null, { icon: "plus", cls: "flat small", title: t("Stage all untracked files"), onclick: () => this.stage(paths()) }));
+    return h("div", { class: "files-header" }, h("span", null, title), h("span", { class: "count" }, count.toLocaleString()), h("span", { class: "spacer" }), ...actions);
+  }
+
+  private fileRow(it: Item, index: number, cur: string | null): HTMLElement {
     const k = key(it);
     const p = it.e.path;
     const slash = p.lastIndexOf("/");
@@ -189,17 +263,30 @@ export class CommitView {
     const dir = slash >= 0 ? p.slice(0, slash + 1) : "";
     const sel = this.selected.has(k);
     const el = h("div", {
-      class: "frow" + (sel ? " sel" : "") + (this.current && key(this.current.item) === k ? " current" : ""),
+      class: "frow" + (sel ? " sel" : "") + (cur === k ? " current" : ""),
       role: "option", "aria-selected": String(sel), title: `${p}${it.e.old_path ? ` ← ${it.e.old_path}` : ""}\n${statusName(it.e.status)}`,
-    }, statusIcon(it.e.status), h("span", { class: "fname" }, name), h("span", { class: "fdir" }, dir));
-    el.dataset.k = k;
-    el.addEventListener("mousedown", (e) => {
+    }, statusIcon(it.e.status), h("span", { class: "fname" }, name), h("span", { class: "fdir" }, dir ? "\u200e" + dir + "\u200e" : ""));
+    el.dataset.i = String(index);
+    return el;
+  }
+
+  private attachListEvents() {
+    const itemOf = (e: Event) => {
+      const row = (e.target as HTMLElement).closest<HTMLElement>(".frow");
+      return row ? this.itemList[Number(row.dataset.i)] : undefined;
+    };
+    this.layer.addEventListener("mousedown", (e) => {
+      const it = itemOf(e);
+      if (!it) return;
+      const k = key(it);
+      // Rows are re-rendered below, so focus the list explicitly.
+      e.preventDefault();
+      this.side.focus({ preventScroll: true });
       if (e.button === 2 && this.selected.has(k)) return;
-      if (e.shiftKey && this.focusKey) {
-        const all = this.items().map(key);
-        const a = all.indexOf(this.focusKey), b = all.indexOf(k);
+      if (e.shiftKey && this.focusKey && this.keyIndex.has(this.focusKey)) {
+        const a = this.keyIndex.get(this.focusKey)!, b = this.keyIndex.get(k)!;
         if (!(e.ctrlKey || e.metaKey)) this.selected.clear();
-        for (let i = Math.min(a, b); i <= Math.max(a, b); i++) this.selected.add(all[i]);
+        for (let i = Math.min(a, b); i <= Math.max(a, b); i++) this.selected.add(key(this.itemList[i]));
       } else if (e.ctrlKey || e.metaKey) {
         if (this.selected.has(k)) this.selected.delete(k); else this.selected.add(k);
         this.focusKey = k;
@@ -207,44 +294,62 @@ export class CommitView {
         this.selected = new Set([k]);
         this.focusKey = k;
       }
-      this.updateRowSel();
       void this.showDiff(it, false);
     });
-    el.addEventListener("dblclick", () => this.toggleStage([it]));
-    el.addEventListener("contextmenu", (e) => {
+    this.layer.addEventListener("dblclick", (e) => {
+      const it = itemOf(e);
+      if (it) void this.toggleStage([it]);
+    });
+    this.layer.addEventListener("contextmenu", (e) => {
+      if (!itemOf(e)) return;
       e.preventDefault();
       popupMenu(e.clientX, e.clientY, this.menu(this.selectedItems()));
     });
-    return el;
   }
 
   private updateRowSel() {
-    this.side.querySelectorAll<HTMLElement>(".frow").forEach((r) => {
-      const s = this.selected.has(r.dataset.k!);
-      r.classList.toggle("sel", s);
-      r.setAttribute("aria-selected", String(s));
-      r.classList.toggle("current", !!this.current && key(this.current.item) === r.dataset.k);
-    });
+    this.renderWindow();
+  }
+
+  /** Scrolls the list so that the item is visible. */
+  private revealItem(index: number) {
+    const ri = this.rows.findIndex((r) => r.kind === "file" && r.index === index);
+    if (ri < 0) return;
+    const top = this.offsets[ri], bottom = this.offsets[ri + 1];
+    // Keep the section header in view for the first file of a section.
+    const headTop = ri > 0 && this.rows[ri - 1].kind === "header" ? this.offsets[ri - 1] : top;
+    if (headTop < this.side.scrollTop) this.side.scrollTop = headTop;
+    else if (bottom > this.side.scrollTop + this.side.clientHeight) this.side.scrollTop = bottom - this.side.clientHeight;
+    this.renderWindow();
   }
 
   private selectedItems(): Item[] {
-    return this.items().filter((i) => this.selected.has(key(i)));
+    return [...this.selected]
+      .map((k) => this.keyIndex.get(k))
+      .filter((i): i is number => i !== undefined)
+      .sort((a, b) => a - b)
+      .map((i) => this.itemList[i]);
   }
 
   private onKey(e: KeyboardEvent) {
     const all = this.items();
     if (all.length === 0) return;
-    let i = all.findIndex((x) => key(x) === this.focusKey);
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    let i = this.focusKey ? this.keyIndex.get(this.focusKey) ?? -1 : -1;
+    const page = Math.max(1, Math.floor(this.side.clientHeight / H_FILE) - 1);
+    const moves: Record<string, number> = {
+      ArrowDown: Math.min(all.length - 1, i + 1), ArrowUp: Math.max(0, i - 1),
+      PageDown: Math.min(all.length - 1, i + page), PageUp: Math.max(0, i - page),
+      Home: 0, End: all.length - 1,
+    };
+    if (e.key in moves) {
       e.preventDefault();
-      i = e.key === "ArrowDown" ? Math.min(all.length - 1, i + 1) : Math.max(0, i - 1);
+      i = moves[e.key];
       const it = all[i];
       const k = key(it);
       if (e.shiftKey) this.selected.add(k);
       else this.selected = new Set([k]);
       this.focusKey = k;
-      this.updateRowSel();
-      this.side.querySelector(`.frow[data-k="${CSS.escape(k)}"]`)?.scrollIntoView({ block: "nearest" });
+      this.revealItem(i);
       void this.showDiff(it, false);
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
@@ -283,19 +388,25 @@ export class CommitView {
   }
 
   // ------------------------------------------------------------ operations
+  /** Paths a command may touch, used to collapse fully selected directories. */
+  private universe(...secs: Section[]): string[] {
+    return secs.flatMap((sec) => this.status?.[sec].map((e) => e.path) ?? []);
+  }
+
   private async stage(paths: string[]) {
     if (!paths.length) return;
-    await this.run(["add", "-A", "--", ...paths]);
+    await this.runPaths(["add", "-A"], [], compressPaths(paths, this.universe("unstaged", "untracked", "conflicted")));
   }
 
   private async unstage(paths: string[]) {
     if (!paths.length) return;
-    if (app.repo?.unborn) await this.run(["rm", "--cached", "-r", "-q", "--", ...paths]);
-    else await this.run(["reset", "-q", "HEAD", "--", ...paths]);
+    const ps = compressPaths(paths, this.universe("staged"));
+    if (app.repo?.unborn) await this.runPaths(["rm", "--cached", "-r", "-q"], [], ps);
+    else await this.runPaths(["reset", "-q"], ["HEAD"], ps);
   }
 
   private async resolve(paths: string[], side: "ours" | "theirs") {
-    const ok = await this.run(["checkout", "--" + side, "--", ...paths]);
+    const ok = await this.runPaths(["checkout", "--" + side], [], paths);
     if (ok !== null) await this.stage(paths);
   }
 
@@ -316,7 +427,7 @@ export class CommitView {
       untracked.length && !tracked.length ? t("Delete untracked files?") : t("Discard changes?"),
       t("This cannot be undone:") + "\n" + shown, untracked.length && !tracked.length ? t("Delete") : t("Discard"), true);
     if (!ok) return;
-    if (tracked.length) await this.run(["checkout", "--", ...tracked]);
+    if (tracked.length) await this.runPaths(["checkout"], [], compressPaths(tracked, this.universe("unstaged", "conflicted")));
     if (untracked.length) {
       try { await api.deleteFiles(untracked); } catch (e) { await errorDialog(t("Failed to delete files"), e); }
       requestRefresh("index");
@@ -338,8 +449,16 @@ export class CommitView {
     requestRefresh("index");
   }
 
-  private run(args: string[]) {
-    return runGit(args, { refresh: ["index"] });
+  /**
+   * Runs `git <cmd...> --pathspec-from-file=- <trailing...>` with the paths on
+   * stdin: no command-line length limit (thousands of files, Windows) and
+   * paths are taken literally (no glob interpretation).
+   */
+  private runPaths(cmd: string[], trailing: string[], paths: string[]) {
+    return runGit(["--literal-pathspecs", ...cmd, "--pathspec-from-file=-", "--pathspec-file-nul", ...trailing], {
+      stdin: paths.join("\0") + "\0",
+      refresh: ["index"],
+    });
   }
 
   private async stageSelection() {
@@ -560,6 +679,39 @@ export class CommitView {
     const b = await runGit(["config", scope, "user.email", String(r.email)], { refresh: [] });
     return a !== null && b !== null;
   }
+}
+
+/**
+ * Replaces files by their directory when every path under that directory
+ * which the command could touch (`universe`) is selected. git matches
+ * thousands of individual pathspecs very slowly (50k files: ~20 s), while a
+ * directory pathspec is instant; the result is identical.
+ */
+export function compressPaths(selected: string[], universe: string[]): string[] {
+  if (selected.length < 64) return selected;
+  const sel = new Set(selected);
+  const total = new Map<string, number>();
+  const chosen = new Map<string, number>();
+  const bump = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
+  for (const p of universe) {
+    const picked = sel.has(p);
+    for (let i = p.indexOf("/"); i > 0; i = p.indexOf("/", i + 1)) {
+      const dir = p.slice(0, i);
+      bump(total, dir);
+      if (picked) bump(chosen, dir);
+    }
+  }
+  const out = new Set<string>();
+  for (const p of selected) {
+    let best = p;
+    for (let i = p.indexOf("/"); i > 0; i = p.indexOf("/", i + 1)) {
+      const dir = p.slice(0, i);
+      const n = total.get(dir);
+      if (n !== undefined && n === chosen.get(dir)) { best = dir; break; }
+    }
+    out.add(best);
+  }
+  return [...out];
 }
 
 function key(i: Item) {

@@ -376,11 +376,14 @@ textarea.entry { resize: vertical; }
 .empty-state .big { font-size: 20px; font-weight: 700; color: var(--fg); }
 
 /* ------------------------------------------------------------ commit view */
-.sidebar.files { padding: 4px 0 12px; outline: none; }
-.files-header { display: flex; align-items: center; gap: 6px; padding: 10px 10px 4px 14px; font-weight: 700; font-size: 13px; color: var(--dim); flex: none; }
+.sidebar.files { display: block; position: relative; padding: 0; outline: none; }
+.vlist-spacer { width: 1px; }
+.vlist-layer { position: absolute; top: 0; left: 0; right: 0; }
+.vrow { position: absolute; left: 0; right: 0; }
+.files-header { display: flex; align-items: center; gap: 6px; height: 34px; padding: 6px 10px 0 14px; font-weight: 700; font-size: 13px; color: var(--dim); flex: none; }
 .files-header .count { font-weight: 600; font-size: 11.5px; background: color-mix(in srgb, var(--fg) 10%, transparent); border-radius: 8px; padding: 0 6px; }
-.files-empty { padding: 4px 16px 8px; font-size: 13px; }
-.frow { display: flex; align-items: center; gap: 8px; min-height: 28px; margin: 0 6px; padding: 0 8px; border-radius: 6px; white-space: nowrap; flex: none; }
+.files-empty { height: 26px; padding: 3px 16px 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frow { display: flex; align-items: center; gap: 8px; height: 28px; margin: 0 6px; padding: 0 8px; border-radius: 6px; white-space: nowrap; flex: none; }
 .frow:hover { background: var(--row-hover); }
 .frow.sel { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .sidebar.files:focus .frow.sel { background: var(--sel-bg); color: var(--sel-fg); }
