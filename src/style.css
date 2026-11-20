@@ -299,6 +299,8 @@ textarea.entry { resize: vertical; }
 .file-summary { display: flex; flex-direction: column; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .fs-row { display: flex; align-items: center; gap: 8px; border: 0; background: transparent; padding: 3px 8px; border-radius: 5px; text-align: left; font-size: 13px; }
 .fs-row:hover { background: var(--row-hover); }
+.fs-row.active { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.fs-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 8px 4px; font-size: 12.5px; }
 .fs-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12.5px; }
 .fs-num { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; }
 .fs-bar { display: inline-flex; width: 62px; height: 8px; }

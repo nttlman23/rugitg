@@ -533,7 +533,8 @@ class DetailsPane {
   private toolbar: HTMLElement;
   private diff: DiffView;
   private token = 0;
-  private current: { oid: string; parent: number; details?: CommitDetails } | null = null;
+  private current: { oid: string; parent: number; details?: CommitDetails; only?: string } | null = null;
+  private diffFiles: FileDiff[] = [];
   private tab: "changes" | "files" = "changes";
   private parentSel: HTMLElement;
   onJump: (oid: string) => void = () => {};
@@ -625,9 +626,12 @@ class DetailsPane {
       clear(scroller);
       this.diff.clear();
       scroller.appendChild(this.header(d));
+      this.diffFiles = diff.files;
+      // Keep the chosen file when only the diff options changed.
+      if (cur.only && !diff.files.some((f) => f.path === cur.only)) cur.only = undefined;
       if (diff.files.length > 1) scroller.appendChild(this.fileList(diff.files));
       scroller.appendChild(this.diff.el);
-      this.diff.render(diff.files);
+      this.diff.render(cur.only ? diff.files.filter((f) => f.path === cur.only) : diff.files);
       scroller.scrollTop = 0;
     } catch (e) {
       if (tok !== this.token) return;
@@ -676,20 +680,44 @@ class DetailsPane {
     );
   }
 
+  /** Shows the changes of one file only, or of all files (path = undefined). */
+  private showOnly(path: string | undefined) {
+    const cur = this.current;
+    if (!cur) return;
+    cur.only = path;
+    this.diff.clear();
+    this.diff.render(path ? this.diffFiles.filter((f) => f.path === path) : this.diffFiles);
+    const list = this.changes.querySelector(".file-summary");
+    list?.querySelectorAll<HTMLElement>(".fs-row").forEach((r) => {
+      const on = r.dataset.path === path;
+      r.classList.toggle("active", on);
+      r.setAttribute("aria-pressed", String(on));
+    });
+    list?.querySelector(".fs-all")?.classList.toggle("hidden", !path);
+    // Bring the start of the diff into view, keeping the file list above it reachable.
+    const top = this.diff.el.offsetTop - this.changes.offsetTop;
+    if (this.changes.scrollTop > top || path) this.changes.scrollTop = Math.max(0, top - 8);
+  }
+
   private fileList(files: FileDiff[]): HTMLElement {
     const maxc = Math.max(1, ...files.map((f) => f.additions + f.deletions));
-    const list = h("div", { class: "file-summary" });
-    files.forEach((f, i) => {
+    const only = this.current?.only;
+    const all = h("button", { class: "link fs-all" + (only ? "" : " hidden") }, t("Show all files"));
+    all.addEventListener("click", () => this.showOnly(undefined));
+    const list = h("div", { class: "file-summary" },
+      h("div", { class: "fs-head" }, h("span", { class: "dim" }, t("{0} files changed", files.length)), all));
+    files.forEach((f) => {
       const tot = f.additions + f.deletions;
       const w = Math.max(tot ? 4 : 0, Math.round((tot / maxc) * 60));
       const aw = tot ? Math.round((f.additions / tot) * w) : 0;
-      const row = h("button", { class: "fs-row" },
+      const row = h("button", { class: "fs-row" + (only === f.path ? " active" : ""), "aria-pressed": String(only === f.path), title: t("Show only this file") },
         statusIcon(f.status),
         h("span", { class: "fs-path" }, f.old_path ? `${f.old_path} → ${f.path}` : f.path),
         h("span", { class: "fs-num" }, f.binary ? t("binary") : `+${f.additions} −${f.deletions}`),
         h("span", { class: "fs-bar" }, h("span", { class: "a", style: `width:${aw}px` }), h("span", { class: "d", style: `width:${w - aw}px` })),
       );
-      row.addEventListener("click", () => this.diff.scrollToFile(i));
+      row.dataset.path = f.path;
+      row.addEventListener("click", () => this.showOnly(this.current?.only === f.path ? undefined : f.path));
       list.appendChild(row);
     });
     return list;
