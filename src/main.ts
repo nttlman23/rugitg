@@ -251,7 +251,7 @@ function shortcuts() {
 function about() {
   void dialog(t("About rugitg"), h("div", { class: "about" },
     h("div", { class: "dash-logo" }, icon("history")),
-    h("p", null, h("strong", null, "rugitg 0.1.0")),
+    h("p", null, h("strong", null, "rugitg 0.2.0")),
     h("p", { class: "dim" }, t("A fast Git repository browser and commit tool in the spirit of gitg, written in Rust with Tauri.")),
     h("p", { class: "dim" }, t("Reading uses libgit2; changes are made with your installed git, so hooks, credential helpers and filters work as usual."))),
   [{ label: t("Close"), value: "ok", primary: true }]);
