@@ -1,3 +1,4 @@
+mod askpass;
 mod git;
 
 use git::diff::{self, DiffOpts, DiffResult, FileDiff, PatchMode};
@@ -543,6 +544,17 @@ async fn write_file(path: String, content: String) -> R<()> {
     blocking(move || std::fs::write(&path, content).map_err(|e| e.to_string())).await
 }
 
+/// Answers a credential prompt shown by the askpass dialog (None = cancelled).
+#[tauri::command]
+fn askpass_reply(id: u64, value: Option<String>) {
+    askpass::reply(id, value);
+}
+
+/// Runs rugitg as a GIT_ASKPASS/SSH_ASKPASS helper if git started it that way.
+pub fn askpass_helper() -> Option<i32> {
+    askpass::helper_main()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -550,6 +562,9 @@ pub fn run() {
         .manage(AppState::default())
         .setup(|app| {
             let _ = app.get_webview_window("main");
+            if let Err(e) = askpass::start(app.handle().clone()) {
+                eprintln!("rugitg: credential prompts unavailable: {e}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -580,6 +595,7 @@ pub fn run() {
             apply_lines,
             delete_files,
             write_file,
+            askpass_reply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running rugitg");

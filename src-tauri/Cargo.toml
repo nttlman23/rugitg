@@ -21,6 +21,7 @@ parking_lot = "0.12"
 dirs = "6"
 base64 = "0.22"
 notify = "8"
+getrandom = "0.3"
 
 [profile.release]
 opt-level = 3

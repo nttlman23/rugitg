@@ -9,8 +9,10 @@ use std::process::{Command, Stdio};
 pub fn command(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir);
-    // Never block waiting for input on a terminal that does not exist.
+    // Never block waiting for input on a terminal that does not exist;
+    // credentials are asked for in a dialog through GIT_ASKPASS/SSH_ASKPASS.
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    crate::askpass::configure(&mut cmd);
     cmd.env("GIT_EDITOR", "true");
     cmd.env("GIT_MERGE_AUTOEDIT", "no");
     #[cfg(windows)]

@@ -2,6 +2,14 @@
 import { setLocaleName } from "./ui";
 
 const ru: Record<string, string> = {
+  "Confirm connection": "Подтвердите подключение",
+  "SSH does not know this server yet. Connect only if the fingerprint matches the one published by the server owner.": "SSH ещё не знает этот сервер. Подключайтесь, только если отпечаток ключа совпадает с опубликованным владельцем сервера.",
+  "Connect": "Подключиться",
+  "Username required": "Требуется имя пользователя",
+  "SSH key passphrase required": "Требуется пароль ключа SSH",
+  "Password required": "Требуется пароль",
+  "Show password": "Показать пароль",
+  "To avoid typing it again, set up a credential helper or ssh-agent.": "Чтобы не вводить его каждый раз, настройте хранилище паролей git (credential helper) или ssh-agent.",
   "(none)": "(нет)",
   "A bisect is in progress.": "Идёт бинарный поиск (bisect).",
   "A cherry-pick is in progress.": "Идёт перенос коммита (cherry-pick).",

@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./api";
 import * as A from "./actions";
 import { app, requestRefresh, type RefreshKind } from "./app";
+import { initAskpass } from "./askpass";
 import { CommitView } from "./commit";
 import { Dash } from "./dash";
 import { HistoryView } from "./history";
@@ -13,6 +14,7 @@ import { button, clear, closeMenu, dialog, errorDialog, h, icon, menuAt, type Me
 
 initI18n(prefs.language);
 applyTheme();
+initAskpass();
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => window.dispatchEvent(new Event("theme-changed")));
 
 const dash = new Dash();
