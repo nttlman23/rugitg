@@ -20,14 +20,39 @@
         "minHeight": 450
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage", "rpm", "nsis", "msi"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "targets": [
+      "deb",
+      "appimage",
+      "rpm",
+      "nsis",
+      "msi"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "Fast Git repository browser",
     "longDescription": "A fast gitg-like graphical Git client written in Rust with Tauri."
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUwNTlGMTc0MTBDOUI4Q0QKUldUTnVNa1FkUEZaVUJ3RTdoTXZBeUFDMVJnNVpKYm9HQ2ZaNzNrYVg2ZWx1dTdRNFRrUUVraTkK",
+      "endpoints": [
+        "https://github.com/nttlman23/rugitg/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

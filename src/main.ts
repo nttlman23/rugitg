@@ -1,10 +1,12 @@
 import "./style.css";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./api";
 import * as A from "./actions";
 import { app, requestRefresh, type RefreshKind } from "./app";
 import { initAskpass } from "./askpass";
+import { checkForUpdates, initUpdates, K_REOPEN } from "./updates";
 import { CommitView } from "./commit";
 import { Dash } from "./dash";
 import { HistoryView } from "./history";
@@ -64,6 +66,7 @@ function mainMenu(): MenuItem[] {
     { label: t("Close repository"), action: () => closeRepo(), disabled: !inRepo },
     { separator: true },
     { label: t("Preferences"), action: () => preferences() },
+    { label: t("Check for updates…"), action: () => void checkForUpdates(true) },
     { label: t("Keyboard shortcuts"), action: () => shortcuts() },
     { label: t("About rugitg"), action: () => about() },
   ];
@@ -210,6 +213,7 @@ function preferences() {
     sel("layout", t("History layout"), [["vertical", t("Diff below the commit list")], ["horizontal", t("Diff beside the commit list")]]),
     sel("dateFormat", t("Dates"), [["relative", t("Relative (2 hours ago)")], ["absolute", t("Absolute")]]),
     chk("showSidebar", t("Show the references sidebar")),
+    chk("autoUpdateCheck", t("Check for updates automatically (once a day)")),
     h("h3", null, t("History")),
     sel("defaultSelection", t("Show when opening"), [["all", t("All commits")], ["current", t("Current branch")]]),
     chk("topo", t("Topological order (parents always below children)")),
@@ -248,10 +252,13 @@ function shortcuts() {
   void dialog(t("Keyboard shortcuts"), tbl, [{ label: t("Close"), value: "ok", primary: true }], { wide: true });
 }
 
+let appVersion = "";
+void getVersion().then((v) => (appVersion = v)).catch(() => {});
+
 function about() {
   void dialog(t("About rugitg"), h("div", { class: "about" },
     h("div", { class: "dash-logo" }, icon("history")),
-    h("p", null, h("strong", null, "rugitg 0.2.0")),
+    h("p", null, h("strong", null, "rugitg " + appVersion)),
     h("p", { class: "dim" }, t("A fast Git repository browser and commit tool in the spirit of gitg, written in Rust with Tauri.")),
     h("p", { class: "dim" }, t("Reading uses libgit2; changes are made with your installed git, so hooks, credential helpers and filters work as usual."))),
   [{ label: t("Close"), value: "ok", primary: true }]);
@@ -260,8 +267,15 @@ function about() {
 // ---------------------------------------------------------------- start
 async function start() {
   setMode("dash");
-  const p = await api.initialPath().catch(() => null);
+  let p = await api.initialPath().catch(() => null);
+  // After an update the repository that was open is opened again.
+  try {
+    const reopen = localStorage.getItem(K_REOPEN);
+    localStorage.removeItem(K_REOPEN);
+    if (!p && reopen) p = reopen;
+  } catch { /* ignore */ }
   if (p) await openRepo(p);
   else await dash.load();
+  initUpdates();
 }
 void start();

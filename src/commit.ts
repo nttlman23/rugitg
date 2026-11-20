@@ -597,6 +597,7 @@ export class CommitView {
       return this.commitDialog();
     }
     const msg = h("textarea", { class: "entry commit-msg", rows: 10, spellcheck: true, placeholder: t("Commit message: a short summary on the first line, then an empty line and details") });
+    if (!this.draft) this.draft = loadDraft();
     msg.value = this.draft;
     const counter = h("span", { class: "subject-count dim" });
     const updateCount = () => {
@@ -605,7 +606,7 @@ export class CommitView {
       counter.classList.toggle("over", first > prefs.subjectLimit);
       counter.title = t("Subject length (recommended ≤ {0})", prefs.subjectLimit);
     };
-    msg.addEventListener("input", () => { this.draft = msg.value; updateCount(); });
+    msg.addEventListener("input", () => { this.draft = msg.value; saveDraft(msg.value); updateCount(); });
     updateCount();
     const amend = h("input", { type: "checkbox" });
     const signoff = h("input", { type: "checkbox", checked: prefs.signoff });
@@ -662,6 +663,7 @@ export class CommitView {
     const out = await runGit(args, { stdin: msg.value, progress: t("Committing…"), success: t("Committed"), errorTitle: t("Commit failed") });
     if (out !== null) {
       this.draft = "";
+      saveDraft("");
       this.current = null;
       this.selected.clear();
     }
@@ -712,6 +714,20 @@ export function compressPaths(selected: string[], universe: string[]): string[] 
     out.add(best);
   }
   return [...out];
+}
+
+/** The unfinished commit message is kept per repository (e.g. across a restart for an update). */
+function draftKey() {
+  return "rugitg:draft:" + (app.repo?.path ?? "");
+}
+function loadDraft(): string {
+  try { return localStorage.getItem(draftKey()) ?? ""; } catch { return ""; }
+}
+function saveDraft(v: string) {
+  try {
+    if (v.trim()) localStorage.setItem(draftKey(), v);
+    else localStorage.removeItem(draftKey());
+  } catch { /* ignore */ }
 }
 
 function key(i: Item) {

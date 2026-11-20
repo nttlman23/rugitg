@@ -544,6 +544,33 @@ async fn write_file(path: String, content: String) -> R<()> {
     blocking(move || std::fs::write(&path, content).map_err(|e| e.to_string())).await
 }
 
+#[derive(Serialize)]
+struct UpdateSupport {
+    version: String,
+    /// Package format of this installation ("nsis", "msi", "appimage", "deb",
+    /// "rpm", "app"), or None for a development build that cannot update itself.
+    bundle: Option<String>,
+    os: &'static str,
+}
+
+/// How this copy of rugitg was installed, which decides whether it can update itself.
+#[tauri::command]
+fn update_support(app: AppHandle) -> UpdateSupport {
+    use tauri::utils::config::BundleType;
+    let bundle = tauri::utils::platform::bundle_type().map(|b| {
+        match b {
+            BundleType::Deb => "deb",
+            BundleType::Rpm => "rpm",
+            BundleType::AppImage => "appimage",
+            BundleType::Msi => "msi",
+            BundleType::Nsis => "nsis",
+            BundleType::App | BundleType::Dmg => "app",
+        }
+        .to_string()
+    });
+    UpdateSupport { version: app.package_info().version.to_string(), bundle, os: std::env::consts::OS }
+}
+
 /// Answers a credential prompt shown by the askpass dialog (None = cancelled).
 #[tauri::command]
 fn askpass_reply(id: u64, value: Option<String>) {
@@ -559,6 +586,9 @@ pub fn askpass_helper() -> Option<i32> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
         .setup(|app| {
             let _ = app.get_webview_window("main");
@@ -596,6 +626,7 @@ pub fn run() {
             delete_files,
             write_file,
             askpass_reply,
+            update_support,
         ])
         .run(tauri::generate_context!())
         .expect("error while running rugitg");

@@ -16,6 +16,7 @@ export interface Prefs {
   subjectLimit: number;
   showSidebar: boolean;
   confirmPush: boolean;
+  autoUpdateCheck: boolean;
 }
 
 const defaults: Prefs = {
@@ -36,6 +37,7 @@ const defaults: Prefs = {
   subjectLimit: 50,
   showSidebar: true,
   confirmPush: true,
+  autoUpdateCheck: true,
 };
 
 function load(): Prefs {

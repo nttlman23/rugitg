@@ -216,7 +216,7 @@ export function errorDialog(title: string, err: unknown) {
 }
 
 // ------------------------------------------------------------------ notifications
-export function notify(text: string, opts: { spinner?: boolean; error?: boolean; timeout?: number } = {}) {
+export function notify(text: string, opts: { spinner?: boolean; error?: boolean; timeout?: number; action?: { label: string; onClick: () => void } } = {}) {
   let area = document.getElementById("notifications");
   if (!area) {
     area = h("div", { id: "notifications", "aria-live": "polite" });
@@ -225,6 +225,10 @@ export function notify(text: string, opts: { spinner?: boolean; error?: boolean;
   const label = h("span", null, text);
   const el = h("div", { class: "notification" + (opts.error ? " error" : "") },
     opts.spinner ? h("span", { class: "spinner" }) : null, label);
+  if (opts.action) {
+    const a = opts.action;
+    el.appendChild(button(a.label, { cls: "flat notification-action", onclick: () => { el.remove(); a.onClick(); } }));
+  }
   const closeBtn = button(null, { icon: "close", cls: "flat small", onclick: () => el.remove() });
   el.appendChild(closeBtn);
   area.appendChild(el);
