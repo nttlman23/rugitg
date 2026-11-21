@@ -694,9 +694,8 @@ class DetailsPane {
       r.setAttribute("aria-pressed", String(on));
     });
     list?.querySelector(".fs-all")?.classList.toggle("hidden", !path);
-    // Bring the start of the diff into view, keeping the file list above it reachable.
-    const top = this.diff.el.offsetTop - this.changes.offsetTop;
-    if (this.changes.scrollTop > top || path) this.changes.scrollTop = Math.max(0, top - 8);
+    // The scroll position is kept on purpose: the file list stays where the
+    // user clicked, so the next file can be picked right away.
   }
 
   private fileList(files: FileDiff[]): HTMLElement {
