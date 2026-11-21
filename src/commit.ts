@@ -351,11 +351,12 @@ export class CommitView {
       this.focusKey = k;
       this.revealItem(i);
       void this.showDiff(it, false);
-    } else if (e.key === "Enter" || e.key === " ") {
+    } else if ((e.key === "Enter" || e.key === " ") && !(e.ctrlKey || e.metaKey || e.altKey)) {
+      // Ctrl+Enter belongs to the commit dialog and must not stage the file.
       e.preventDefault();
       const items = this.selectedItems();
       if (items.length) void this.toggleStage(items);
-    } else if (e.key === "Delete") {
+    } else if (e.key === "Delete" && !(e.ctrlKey || e.metaKey || e.altKey)) {
       const items = this.selectedItems();
       if (items.length) void this.discard(items);
     } else if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
