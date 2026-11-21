@@ -2,9 +2,9 @@
 import { setLocaleName } from "./ui";
 
 const ru: Record<string, string> = {
+  "Show the changes of this file": "Показать изменения этого файла",
   "Show all files": "Показать все файлы",
   "{0} files changed": "Изменено файлов: {0}",
-  "Show only this file": "Показать только этот файл",
   "Checking for updates…": "Проверка обновлений…",
   "Could not check for updates": "Не удалось проверить обновления",
   "No updates": "Обновлений нет",

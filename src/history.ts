@@ -535,18 +535,22 @@ class DetailsPane {
   private token = 0;
   private current: { oid: string; parent: number; details?: CommitDetails; only?: string } | null = null;
   private diffFiles: FileDiff[] = [];
+  private inline: DiffView;
   private tab: "changes" | "files" = "changes";
   private parentSel: HTMLElement;
   onJump: (oid: string) => void = () => {};
 
   constructor() {
-    this.diff = new DiffView({
-      loadFile: (f) => this.current ? api.commitFileDiff(this.current.oid, f.path, f.old_path, diffOpts(), this.current.parent) : Promise.resolve(null),
-      loadImage: (f, side) => {
+    const diffOptions = {
+      loadFile: (f: FileDiff) => this.current ? api.commitFileDiff(this.current.oid, f.path, f.old_path, diffOpts(), this.current.parent) : Promise.resolve(null),
+      loadImage: (f: FileDiff, side: "old" | "new") => {
         const oid = side === "old" ? f.old_oid : f.new_oid;
         return oid ? api.blobOid(oid, f.path) : Promise.resolve(null);
       },
-    });
+    };
+    this.diff = new DiffView(diffOptions);
+    // Diff of the file expanded inside the file list.
+    this.inline = new DiffView({ ...diffOptions, fileHeaders: false });
     this.changes = h("div", { class: "details-changes" });
     this.files = h("div", { class: "details-files hidden" });
     this.parentSel = h("span", { class: "parent-sel" });
@@ -631,7 +635,9 @@ class DetailsPane {
       if (cur.only && !diff.files.some((f) => f.path === cur.only)) cur.only = undefined;
       if (diff.files.length > 1) scroller.appendChild(this.fileList(diff.files));
       scroller.appendChild(this.diff.el);
-      this.diff.render(cur.only ? diff.files.filter((f) => f.path === cur.only) : diff.files);
+      this.diff.el.classList.remove("hidden");
+      this.diff.render(diff.files);
+      if (cur.only) this.showOnly(cur.only);
       scroller.scrollTop = 0;
     } catch (e) {
       if (tok !== this.token) return;
@@ -681,21 +687,33 @@ class DetailsPane {
   }
 
   /** Shows the changes of one file only, or of all files (path = undefined). */
+  /**
+   * Expands the diff of one file right below its row in the file list
+   * (accordion), or shows the diff of all files below the list (undefined).
+   */
   private showOnly(path: string | undefined) {
     const cur = this.current;
     if (!cur) return;
     cur.only = path;
-    this.diff.clear();
-    this.diff.render(path ? this.diffFiles.filter((f) => f.path === path) : this.diffFiles);
-    const list = this.changes.querySelector(".file-summary");
+    const list = this.changes.querySelector<HTMLElement>(".file-summary");
+    list?.querySelectorAll(".fs-expand").forEach((e) => e.remove());
+    this.inline.clear();
+    let row: HTMLElement | null = null;
     list?.querySelectorAll<HTMLElement>(".fs-row").forEach((r) => {
       const on = r.dataset.path === path;
       r.classList.toggle("active", on);
-      r.setAttribute("aria-pressed", String(on));
+      r.setAttribute("aria-expanded", String(on));
+      if (on) row = r;
     });
     list?.querySelector(".fs-all")?.classList.toggle("hidden", !path);
-    // The scroll position is kept on purpose: the file list stays where the
-    // user clicked, so the next file can be picked right away.
+    const file = path ? this.diffFiles.find((f) => f.path === path) : undefined;
+    if (row && file) {
+      const box = h("div", { class: "fs-expand" }, this.inline.el);
+      (row as HTMLElement).after(box);
+      this.inline.render([file]);
+    }
+    // The combined diff below the list is shown only when no file is expanded.
+    this.diff.el.classList.toggle("hidden", !!(row && file));
   }
 
   private fileList(files: FileDiff[]): HTMLElement {
@@ -709,7 +727,7 @@ class DetailsPane {
       const tot = f.additions + f.deletions;
       const w = Math.max(tot ? 4 : 0, Math.round((tot / maxc) * 60));
       const aw = tot ? Math.round((f.additions / tot) * w) : 0;
-      const row = h("button", { class: "fs-row" + (only === f.path ? " active" : ""), "aria-pressed": String(only === f.path), title: t("Show only this file") },
+      const row = h("button", { class: "fs-row", "aria-expanded": "false", title: t("Show the changes of this file") },
         statusIcon(f.status),
         h("span", { class: "fs-path" }, f.old_path ? `${f.old_path} → ${f.path}` : f.path),
         h("span", { class: "fs-num" }, f.binary ? t("binary") : `+${f.additions} −${f.deletions}`),
