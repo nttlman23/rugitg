@@ -10,6 +10,7 @@ export class Dash {
   el: HTMLElement;
   private list: HTMLElement;
   private filter: HTMLInputElement;
+  private top!: HTMLElement;
   private repos: RecentRepo[] = [];
   onOpen: (path: string) => void = () => {};
 
@@ -23,7 +24,7 @@ export class Dash {
     this.list = h("div", { class: "repo-list", role: "list" });
     this.el = h("div", { class: "view dash" },
       h("div", { class: "dash-inner" },
-        h("div", { class: "dash-top" }, this.filter),
+        this.top = h("div", { class: "dash-top" }, this.filter),
         this.list));
   }
 
@@ -34,13 +35,16 @@ export class Dash {
       this.repos = [];
     }
     this.render();
-    this.filter.focus();
+    // With no repositories there is nothing to search: focus the main action instead.
+    if (this.repos.length) this.filter.focus();
+    else (this.list.querySelector(".suggested") as HTMLElement | null)?.focus();
   }
 
   private render() {
     clear(this.list);
     const q = this.filter.value.trim().toLowerCase();
     const shown = this.repos.filter((r) => !q || r.name.toLowerCase().includes(q) || r.path.toLowerCase().includes(q));
+    this.top.classList.toggle("hidden", this.repos.length === 0);
     if (this.repos.length === 0) {
       this.list.appendChild(h("div", { class: "dash-empty" },
         h("div", { class: "dash-logo" }, icon("history")),
