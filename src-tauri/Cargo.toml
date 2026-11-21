@@ -1,6 +1,6 @@
 [package]
 name = "rugitg"
-version = "0.3.2"
+version = "0.3.3"
 description = "Fast gitg-like Git client"
 edition = "2021"
 
