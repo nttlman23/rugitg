@@ -319,9 +319,8 @@ pub fn partial_patch(diff: &Diff, path: &str, selected: &[(usize, usize)], mode:
     let mut any = false;
     for h in 0..patch.num_hunks() {
         let (hunk, n) = patch.hunk(h).map_err(|e| e.message().to_string())?;
-        let mut body: Vec<u8> = Vec::new();
-        let mut old_count = 0i64;
-        let mut new_count = 0i64;
+        // Lines of the partial hunk: origin and content (with its newline, if any).
+        let mut emitted: Vec<(char, &[u8])> = Vec::new();
         let mut changed = false;
         for l in 0..n {
             let line = patch.line_in_hunk(h, l).map_err(|e| e.message().to_string())?;
@@ -333,25 +332,37 @@ pub fn partial_patch(diff: &Diff, path: &str, selected: &[(usize, usize)], mode:
             let emit: Option<char> = match (origin, sel) {
                 (' ', _) => Some(' '),
                 ('+', true) | ('-', true) => Some(origin),
-                ('+', false) => {
-                    if forward {
-                        None
-                    } else {
-                        Some(' ')
-                    }
-                }
-                ('-', false) => {
-                    if forward {
-                        Some(' ')
-                    } else {
-                        None
-                    }
-                }
+                // Unselected lines: present on the side the patch starts from.
+                ('+', false) => (!forward).then_some(' '),
+                ('-', false) => forward.then_some(' '),
                 _ => None,
             };
             let Some(c) = emit else { continue };
-            if c != ' ' {
-                changed = true;
+            changed |= c != ' ';
+            emitted.push((c, line.content()));
+        }
+        if !changed {
+            continue;
+        }
+        let mut body: Vec<u8> = Vec::new();
+        let mut old_count = 0i64;
+        let mut new_count = 0i64;
+        let last = emitted.len() - 1;
+        for (i, &(c, content)) in emitted.iter().enumerate() {
+            let no_newline = !content.ends_with(b"\n");
+            // A kept line without a final newline that is followed by other
+            // lines (only possible when lines after it were selected) cannot
+            // stay context: it has to gain its newline, or git would glue the
+            // next line onto it.
+            if c == ' ' && no_newline && i != last {
+                body.push(b'-');
+                body.extend_from_slice(content);
+                body.extend_from_slice(b"\n\\ No newline at end of file\n+");
+                body.extend_from_slice(content);
+                body.push(b'\n');
+                old_count += 1;
+                new_count += 1;
+                continue;
             }
             match c {
                 ' ' => {
@@ -362,14 +373,10 @@ pub fn partial_patch(diff: &Diff, path: &str, selected: &[(usize, usize)], mode:
                 _ => old_count += 1,
             }
             body.push(c as u8);
-            let content = line.content();
             body.extend_from_slice(content);
-            if !content.ends_with(b"\n") {
+            if no_newline {
                 body.extend_from_slice(b"\n\\ No newline at end of file\n");
             }
-        }
-        if !changed {
-            continue;
         }
         any = true;
         let (old_start, new_start) = if forward {
@@ -389,4 +396,213 @@ pub fn partial_patch(diff: &Diff, path: &str, selected: &[(usize, usize)], mode:
         return Err("Не выбрано ни одной изменённой строки / no changed lines selected".into());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    /// A throwaway repository in the system temp directory.
+    struct TempRepo(PathBuf);
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl TempRepo {
+        fn new() -> Self {
+            let mut raw = [0u8; 8];
+            getrandom::fill(&mut raw).unwrap();
+            let name: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
+            let dir = std::env::temp_dir().join(format!("rugitg-diff-test-{name}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let r = TempRepo(dir);
+            r.git(&["init", "-q"]);
+            r.git(&["config", "user.name", "Test"]);
+            r.git(&["config", "user.email", "test@example.invalid"]);
+            r.git(&["config", "core.autocrlf", "false"]);
+            r
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let out = Command::new("git").args(args).current_dir(&self.0).output().unwrap();
+            assert!(out.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap()
+        }
+
+        fn write(&self, path: &str, content: &str) {
+            std::fs::write(self.0.join(path), content).unwrap();
+        }
+
+        fn read(&self, path: &str) -> String {
+            std::fs::read_to_string(self.0.join(path)).unwrap()
+        }
+
+        fn commit(&self, path: &str, content: &str) {
+            self.write(path, content);
+            self.git(&["add", "--", path]);
+            self.git(&["commit", "-q", "-m", "c"]);
+        }
+
+        fn index(&self, path: &str) -> String {
+            self.git(&["show", &format!(":{path}")])
+        }
+
+        /// Builds a partial patch selecting the changed lines whose
+        /// (origin, text) is listed and applies it the way the app does.
+        fn apply(&self, path: &str, staged: bool, pick: &[(char, &str)], mode: PatchMode) {
+            let repo = Repository::open(&self.0).unwrap();
+            let diff = workdir_diff(&repo, staged, DiffOpts { context: 3, ignore_ws: false }, &[path.to_string()]).unwrap();
+            let res = build(&diff, true).unwrap();
+            let f = res.files.iter().find(|f| f.path == path).expect("file in diff");
+            let mut sel = Vec::new();
+            for (hi, h) in f.hunks.iter().enumerate() {
+                for (li, l) in h.lines.iter().enumerate() {
+                    if pick.iter().any(|(t, s)| *t == l.t && *s == l.s) {
+                        sel.push((hi, li));
+                    }
+                }
+            }
+            assert_eq!(sel.len(), pick.len(), "every picked line must exist in the diff");
+            let patch = partial_patch(&diff, path, &sel, mode).unwrap();
+            let mut args = vec!["apply", "--recount", "--whitespace=nowarn"];
+            match mode {
+                PatchMode::Stage => args.push("--cached"),
+                PatchMode::Unstage => args.extend(["--cached", "-R"]),
+                PatchMode::Discard => args.push("-R"),
+            }
+            args.push("-");
+            let mut child = Command::new("git")
+                .args(&args)
+                .current_dir(&self.0)
+                .stdin(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(&patch).unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "git apply failed: {}\npatch:\n{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&patch)
+            );
+        }
+    }
+
+    #[test]
+    fn stage_one_of_two_added_lines() {
+        let r = TempRepo::new();
+        r.commit("f.txt", "a\nb\nc\n");
+        r.write("f.txt", "a\nx\nb\ny\nc\n");
+        r.apply("f.txt", false, &[('+', "y")], PatchMode::Stage);
+        assert_eq!(r.index("f.txt"), "a\nb\ny\nc\n");
+        assert_eq!(r.read("f.txt"), "a\nx\nb\ny\nc\n");
+    }
+
+    #[test]
+    fn stage_deletion_without_its_replacement() {
+        let r = TempRepo::new();
+        r.commit("f.txt", "1\n2\n3\n4\n5\n");
+        r.write("f.txt", "1\n2\nthree\n4\n5\n");
+        r.apply("f.txt", false, &[('-', "3")], PatchMode::Stage);
+        assert_eq!(r.index("f.txt"), "1\n2\n4\n5\n");
+    }
+
+    #[test]
+    fn stage_second_hunk_shifts_after_first() {
+        let r = TempRepo::new();
+        let lines = |extra: &dyn Fn(u32) -> &'static str| -> String {
+            (1..=30).map(|i| format!("l{i}\n{}", extra(i))).collect()
+        };
+        r.commit("f.txt", &lines(&|_| ""));
+        r.write("f.txt", &lines(&|i| match i { 2 => "A\nB\n", 25 => "Z\n", _ => "" }));
+        r.apply("f.txt", false, &[('+', "A"), ('+', "Z")], PatchMode::Stage);
+        assert_eq!(r.index("f.txt"), lines(&|i| match i { 2 => "A\n", 25 => "Z\n", _ => "" }));
+    }
+
+    #[test]
+    fn unstage_one_line() {
+        let r = TempRepo::new();
+        r.commit("f.txt", "a\nb\nc\n");
+        r.write("f.txt", "a\nx\nb\ny\nc\n");
+        r.git(&["add", "f.txt"]);
+        r.apply("f.txt", true, &[('+', "x")], PatchMode::Unstage);
+        assert_eq!(r.index("f.txt"), "a\nb\ny\nc\n");
+        assert_eq!(r.read("f.txt"), "a\nx\nb\ny\nc\n");
+    }
+
+    #[test]
+    fn unstage_deletion() {
+        let r = TempRepo::new();
+        r.commit("f.txt", "a\nb\nc\nd\n");
+        r.write("f.txt", "a\nd\n");
+        r.git(&["add", "f.txt"]);
+        r.apply("f.txt", true, &[('-', "c")], PatchMode::Unstage);
+        assert_eq!(r.index("f.txt"), "a\nc\nd\n");
+    }
+
+    #[test]
+    fn discard_one_line_in_workdir() {
+        let r = TempRepo::new();
+        r.commit("f.txt", "a\nb\nc\n");
+        r.write("f.txt", "a\nx\nc\nz\n");
+        r.apply("f.txt", false, &[('+', "x"), ('-', "b")], PatchMode::Discard);
+        assert_eq!(r.read("f.txt"), "a\nb\nc\nz\n");
+        assert_eq!(r.index("f.txt"), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn stage_part_of_untracked_file() {
+        let r = TempRepo::new();
+        r.commit("other.txt", "x\n");
+        r.write("new.txt", "one\ntwo\nthree\n");
+        r.apply("new.txt", false, &[('+', "one"), ('+', "three")], PatchMode::Stage);
+        assert_eq!(r.index("new.txt"), "one\nthree\n");
+    }
+
+    #[test]
+    fn stage_line_after_missing_final_newline() {
+        let r = TempRepo::new();
+        r.commit("f.txt", "a\nb");
+        r.write("f.txt", "a\nb\nc\n");
+        // Only the new last line: the old "b" without a newline stays as is
+        // and must not swallow the added line.
+        r.apply("f.txt", false, &[('+', "c")], PatchMode::Stage);
+        assert_eq!(r.index("f.txt"), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn discard_line_after_missing_final_newline() {
+        let r = TempRepo::new();
+        r.commit("f.txt", "a\nb");
+        r.write("f.txt", "a\nb\nc\n");
+        r.apply("f.txt", false, &[('+', "c")], PatchMode::Discard);
+        assert_eq!(r.read("f.txt"), "a\nb\n");
+    }
+
+    #[test]
+    fn stage_fix_of_missing_final_newline() {
+        let r = TempRepo::new();
+        r.commit("f.txt", "a\nb");
+        r.write("f.txt", "a\nb\n");
+        r.apply("f.txt", false, &[('-', "b"), ('+', "b")], PatchMode::Stage);
+        assert_eq!(r.index("f.txt"), "a\nb\n");
+    }
+
+    #[test]
+    fn paths_with_spaces_and_unicode() {
+        let r = TempRepo::new();
+        for p in ["my file.txt", "файл.txt"] {
+            r.commit(p, "a\nb\n");
+            r.write(p, "a\nx\nb\ny\n");
+            r.apply(p, false, &[('+', "x")], PatchMode::Stage);
+            assert_eq!(r.index(p), "a\nx\nb\n", "{p}");
+        }
+    }
 }

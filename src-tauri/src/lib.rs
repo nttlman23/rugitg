@@ -241,7 +241,7 @@ async fn repo_clone(app: AppHandle, url: String, path: String, bare: bool, recur
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-        let mut stderr = child.stderr.take().unwrap();
+        let mut stderr = child.stderr.take().ok_or("git clone: no stderr pipe")?;
         let mut buf = [0u8; 4096];
         let mut line = Vec::new();
         let mut all = String::new();
@@ -488,7 +488,7 @@ async fn wd_diff(state: State<'_, AppState>, path: String, staged: bool, context
     blocking(move || {
         let r = repo::open(&p)?;
         let opts = DiffOpts { context, ignore_ws: false };
-        let d = diff::workdir_diff(&r, staged, opts, &[path.clone()])?;
+        let d = diff::workdir_diff(&r, staged, opts, std::slice::from_ref(&path))?;
         let res = diff::build(&d, force)?;
         Ok(res.files.into_iter().find(|f| f.path == path || f.old_path.as_deref() == Some(&path)))
     })
@@ -508,7 +508,7 @@ async fn apply_lines(
     blocking(move || {
         let r = repo::open(&p)?;
         let opts = DiffOpts { context, ignore_ws: false };
-        let d = diff::workdir_diff(&r, staged, opts, &[path.clone()])?;
+        let d = diff::workdir_diff(&r, staged, opts, std::slice::from_ref(&path))?;
         let patch = diff::partial_patch(&d, &path, &lines, mode)?;
         let mut args: Vec<String> = vec!["apply".into(), "--recount".into(), "--whitespace=nowarn".into()];
         match mode {

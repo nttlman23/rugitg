@@ -4,8 +4,10 @@ import { t } from "./i18n";
 import { button, h, icon } from "./ui";
 import { prefs } from "./prefs";
 
+const ESC: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
 export function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&quot;"));
+  return s.replace(/[&<>"']/g, (c) => ESC[c]);
 }
 
 export function statusIcon(st: string): HTMLElement {

@@ -141,7 +141,7 @@ pub fn refs(repo: &mut Repository) -> Result<Refs, String> {
             is_head: branch.is_head(),
         });
     }
-    local.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    local.sort_by_key(|a| a.name.to_lowercase());
 
     let mut remotes = Vec::new();
     let names = repo.remotes().map_err(err)?;
@@ -171,7 +171,7 @@ pub fn refs(repo: &mut Repository) -> Result<Refs, String> {
                 is_head: false,
             })
             .collect();
-        branches.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        branches.sort_by_key(|a| a.name.to_lowercase());
         remotes.push(RemoteInfo {
             name: rname.to_string(),
             url: r.url().unwrap_or("").to_string(),
