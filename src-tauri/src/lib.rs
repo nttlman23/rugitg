@@ -1,5 +1,6 @@
 mod askpass;
 mod git;
+mod hostenv;
 
 use git::diff::{self, DiffOpts, DiffResult, FileDiff, PatchMode};
 use git::history::{self, History, HistoryOptions, RowOut};
@@ -571,6 +572,44 @@ fn update_support(app: AppHandle) -> UpdateSupport {
     UpdateSupport { version: app.package_info().version.to_string(), bundle, os: std::env::consts::OS }
 }
 
+/// Restarts rugitg (after an update). An AppImage is restarted with the
+/// host environment: inheriting the image's LD_LIBRARY_PATH breaks the
+/// AppImage's own start script on newer distributions.
+#[tauri::command]
+fn relaunch_app(app: AppHandle) {
+    if hostenv::in_appimage() {
+        if let Some(image) = std::env::var_os("APPIMAGE") {
+            let mut cmd = std::process::Command::new(image);
+            cmd.args(std::env::args_os().skip(1));
+            hostenv::apply(&mut cmd);
+            match cmd.spawn() {
+                Ok(_) => app.exit(0),
+                Err(e) => eprintln!("rugitg: failed to restart: {e}"),
+            }
+            return;
+        }
+    }
+    app.restart();
+}
+
+/// Opens the project's releases page in the default browser.
+#[tauri::command]
+fn open_releases_page() -> R<()> {
+    const URL: &str = "https://github.com/nttlman23/rugitg/releases/latest";
+    #[cfg(target_os = "linux")]
+    {
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(URL);
+        hostenv::apply(&mut cmd);
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        tauri_plugin_opener::open_url(URL, None::<&str>).map_err(|e| e.to_string())
+    }
+}
+
 /// Answers a credential prompt shown by the askpass dialog (None = cancelled).
 #[tauri::command]
 fn askpass_reply(id: u64, value: Option<String>) {
@@ -587,7 +626,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
         .setup(|app| {
@@ -627,6 +665,8 @@ pub fn run() {
             write_file,
             askpass_reply,
             update_support,
+            relaunch_app,
+            open_releases_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running rugitg");

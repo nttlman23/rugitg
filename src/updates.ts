@@ -1,14 +1,11 @@
 // Checking for new releases on GitHub and installing them (Tauri updater).
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { app } from "./app";
 import { t } from "./i18n";
 import { prefs } from "./prefs";
 import { dialog, errorDialog, h, notify } from "./ui";
 
-const RELEASES_URL = "https://github.com/nttlman23/rugitg/releases/latest";
 const CHECK_INTERVAL = 24 * 60 * 60 * 1000;
 const K_LAST = "rugitg:update-last-check";
 const K_SKIP = "rugitg:update-skip";
@@ -91,7 +88,7 @@ async function devBuildDialog(version: string) {
     { label: t("Close"), value: "close" },
     { label: t("Open releases page"), value: "open", primary: true },
   ]);
-  if (r === "open") void openUrl(RELEASES_URL);
+  if (r === "open") void invoke("open_releases_page").catch(() => {});
 }
 
 async function offer(update: Update, support: UpdateSupport) {
@@ -142,7 +139,7 @@ async function install(update: Update) {
     });
     if (app.repo) store(K_REOPEN, app.repo.path);
     label.textContent = t("Restarting…");
-    await relaunch();
+    await invoke("relaunch_app");
   } catch (e) {
     close(null);
     const r = await dialog(t("Update failed"), h("div", { class: "form" },
@@ -152,6 +149,6 @@ async function install(update: Update) {
       { label: t("Close"), value: "close" },
       { label: t("Open releases page"), value: "open", primary: true },
     ], { wide: true });
-    if (r === "open") void openUrl(RELEASES_URL);
+    if (r === "open") void invoke("open_releases_page").catch(() => {});
   }
 }

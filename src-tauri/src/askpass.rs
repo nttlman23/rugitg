@@ -118,7 +118,12 @@ pub fn start(app: AppHandle) -> Result<(), String> {
     let mut raw = [0u8; 32];
     getrandom::fill(&mut raw).map_err(|e| e.to_string())?;
     let token: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // In an AppImage the binary lives inside the mounted image and needs the
+    // image's environment, so git must start the AppImage file itself.
+    let exe = match std::env::var_os("APPIMAGE").filter(|_| crate::hostenv::in_appimage()) {
+        Some(image) => PathBuf::from(image),
+        None => std::env::current_exe().map_err(|e| e.to_string())?,
+    };
     SERVER
         .set(Server { port, token, exe })
         .map_err(|_| "askpass server already started".to_string())?;

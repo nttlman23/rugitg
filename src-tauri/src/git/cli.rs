@@ -8,6 +8,8 @@ use std::process::{Command, Stdio};
 
 pub fn command(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
+    // Outside of the AppImage's bundled libraries (no-op elsewhere).
+    crate::hostenv::apply(&mut cmd);
     cmd.current_dir(dir);
     // Never block waiting for input on a terminal that does not exist;
     // credentials are asked for in a dialog through GIT_ASKPASS/SSH_ASKPASS.

@@ -11,15 +11,6 @@
     "core:window:allow-set-focus",
     "core:window:allow-unminimize",
     "dialog:default",
-    "updater:default",
-    "process:allow-restart",
-    {
-      "identifier": "opener:allow-open-url",
-      "allow": [
-        {
-          "url": "https://github.com/nttlman23/rugitg/*"
-        }
-      ]
-    }
+    "updater:default"
   ]
 }
